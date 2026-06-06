@@ -22,12 +22,12 @@ TOKEN = "8607888019:AAH_9KT13bI_K3JjdSi52o_DTNxL2nWkRKc"
 CHAT_ID = "6220442563"
 SYMBOL = 'PAXG/USDT'
 
-# PARAMETRELER
-UPPER_RSI = 70
-LOWER_RSI = 30
-CHECK_INTERVAL = 10  # saniye
+# SCALP PARAMETRELERİ
+UPPER_RSI = 60   # Aşırı alım (scalp için gevşek)
+LOWER_RSI = 40   # Aşırı satım (scalp için gevşek)
+CHECK_INTERVAL = 5  # saniye
 
-# KuCoin bağlantısı (coğrafi kısıtlama yok, ABD sunucusundan erişilebilir)
+# KuCoin bağlantısı
 exchange = ccxt.kucoin({
     'enableRateLimit': True,
     'timeout': 30000,
@@ -38,8 +38,10 @@ def is_trading_hour():
     now_time = datetime.now()
     hour = now_time.hour
     minute = now_time.minute
+    # Londra: 10:00 - 13:00
     if 10 <= hour < 13:
         return True
+    # New York: 15:30 - 21:00
     if hour == 15 and minute >= 30:
         return True
     if 16 <= hour < 21:
@@ -62,20 +64,37 @@ def send_telegram_msg(text):
     return False
 
 
-def get_rsi(symbol, timeframe):
-    bars = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=100)
+def get_data(symbol, timeframe, limit=250):
+    """OHLCV verisi çek, RSI + EMA 9/21 hesapla."""
+    bars = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
     df = pd.DataFrame(bars, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
     df['rsi'] = ta.rsi(df['close'], length=14)
-    return round(df['rsi'].iloc[-1], 2), round(df['close'].iloc[-1], 4)
+    df['ema9'] = ta.ema(df['close'], length=9)
+    df['ema21'] = ta.ema(df['close'], length=21)
+    return df
+
+
+def get_trend(df):
+    """EMA 9/21'e göre trend yönü."""
+    price = df['close'].iloc[-1]
+    ema9 = df['ema9'].iloc[-1]
+    ema21 = df['ema21'].iloc[-1]
+    if ema9 > ema21 and price > ema9:
+        return "📈 Yukarı", True, False
+    elif ema9 < ema21 and price < ema9:
+        return "📉 Aşağı", False, True
+    else:
+        return "➡️ Yatay", False, False
 
 
 def run_bot():
-    logger.info("🚀 SAAT FİLTRELİ SNIPER BOT BAŞLATILDI...")
+    logger.info("🚀 XAU/USD SCALP BOT BAŞLATILDI (PAXG RSI)")
     send_telegram_msg(
-        f"🤖 <b>Bot Başlatıldı!</b>\n"
-        f"📊 Sembol: {SYMBOL}\n"
-        f"🕐 Saat: {datetime.now().strftime('%H:%M:%S')}\n"
-        f"📡 Sunucu üzerinde çalışıyor... (KuCoin)"
+        f"🤖 <b>XAU Scalp Bot Başlatıldı!</b>\n"
+        f"📊 PAXG/USDT → XAU/USD sinyali\n"
+        f"⏱ Timeframe: 1m + 3m\n"
+        f"📈 RSI 40/60 | EMA 9/21\n"
+        f"🕐 {datetime.now().strftime('%H:%M:%S')}"
     )
 
     last_alert = ""
@@ -87,25 +106,57 @@ def run_bot():
             current_time_str = datetime.now().strftime('%H:%M:%S')
 
             if is_trading_hour():
-                rsi_5m, price = get_rsi(SYMBOL, '5m')
-                rsi_15m, _ = get_rsi(SYMBOL, '15m')
-                logger.info(f"[{current_time_str}] Fiyat: {price} | RSI 5m: {rsi_5m} | RSI 15m: {rsi_15m}")
+                # 1m ve 3m veri çek
+                df_1m = get_data(SYMBOL, '1m')
+                df_3m = get_data(SYMBOL, '3m')
 
-                if rsi_5m <= LOWER_RSI and rsi_15m <= 35 and last_alert != "oversold":
-                    msg = (f"🟢 <b>GÜÇLÜ ALIŞ SİNYALİ!</b>\n💰 Fiyat: <b>{price}</b>\n"
-                           f"📉 RSI 5m: {rsi_5m}\n📉 RSI 15m: {rsi_15m}\n"
-                           f"⚠️ 15m OB Bölgesini kontrol et!\n🕐 {current_time_str}")
+                rsi_1m = round(df_1m['rsi'].iloc[-1], 2)
+                rsi_3m = round(df_3m['rsi'].iloc[-1], 2)
+                price = round(df_1m['close'].iloc[-1], 2)
+                ema9 = round(df_1m['ema9'].iloc[-1], 2)
+                ema21 = round(df_1m['ema21'].iloc[-1], 2)
+
+                trend_label, trend_up, trend_down = get_trend(df_1m)
+
+                logger.info(
+                    f"[{current_time_str}] Fiyat: {price} | "
+                    f"RSI 1m: {rsi_1m} | RSI 3m: {rsi_3m} | {trend_label}"
+                )
+
+                # ALIŞ SİNYALİ — RSI aşırı satım + trend yukarı
+                if rsi_1m <= LOWER_RSI and rsi_3m <= 45 and last_alert != "oversold":
+                    ema_note = "✅ EMA trend destekliyor!" if trend_up else "⚠️ Trende karşı, dikkatli ol!"
+                    msg = (
+                        f"🟢 <b>XAU/USD ALIŞ SİNYALİ</b>\n"
+                        f"💰 PAXG Fiyat: <b>{price}</b>\n"
+                        f"📉 RSI 1m: {rsi_1m} | RSI 3m: {rsi_3m}\n"
+                        f"📊 EMA9: {ema9} | EMA21: {ema21}\n"
+                        f"{trend_label}\n"
+                        f"{ema_note}\n"
+                        f"🎯 TP: +10/20$ | SL: -5$\n"
+                        f"🕐 {current_time_str}"
+                    )
                     send_telegram_msg(msg)
                     last_alert = "oversold"
 
-                elif rsi_5m >= UPPER_RSI and rsi_15m >= 65 and last_alert != "overbought":
-                    msg = (f"🔴 <b>GÜÇLÜ SATIŞ SİNYALİ!</b>\n💰 Fiyat: <b>{price}</b>\n"
-                           f"📈 RSI 5m: {rsi_5m}\n📈 RSI 15m: {rsi_15m}\n"
-                           f"⚠️ 15m OB Bölgesini kontrol et!\n🕐 {current_time_str}")
+                # SATIŞ SİNYALİ — RSI aşırı alım + trend aşağı
+                elif rsi_1m >= UPPER_RSI and rsi_3m >= 55 and last_alert != "overbought":
+                    ema_note = "✅ EMA trend destekliyor!" if trend_down else "⚠️ Trende karşı, dikkatli ol!"
+                    msg = (
+                        f"🔴 <b>XAU/USD SATIŞ SİNYALİ</b>\n"
+                        f"💰 PAXG Fiyat: <b>{price}</b>\n"
+                        f"📈 RSI 1m: {rsi_1m} | RSI 3m: {rsi_3m}\n"
+                        f"📊 EMA9: {ema9} | EMA21: {ema21}\n"
+                        f"{trend_label}\n"
+                        f"{ema_note}\n"
+                        f"🎯 TP: +10/20$ | SL: -5$\n"
+                        f"🕐 {current_time_str}"
+                    )
                     send_telegram_msg(msg)
                     last_alert = "overbought"
 
-                elif 45 < rsi_5m < 55:
+                # Nötr bölge — sıfırla
+                elif 48 < rsi_1m < 52:
                     last_alert = ""
 
             else:
