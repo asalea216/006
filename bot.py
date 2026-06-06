@@ -22,12 +22,8 @@ TOKEN = "8607888019:AAH_9KT13bI_K3JjdSi52o_DTNxL2nWkRKc"
 CHAT_ID = "6220442563"
 SYMBOL = 'PAXG/USDT'
 
-# SCALP PARAMETRELERİ
-UPPER_RSI = 60   # Aşırı alım (scalp için gevşek)
-LOWER_RSI = 40   # Aşırı satım (scalp için gevşek)
 CHECK_INTERVAL = 5  # saniye
 
-# KuCoin bağlantısı
 exchange = ccxt.kucoin({
     'enableRateLimit': True,
     'timeout': 30000,
@@ -35,16 +31,13 @@ exchange = ccxt.kucoin({
 
 
 def is_trading_hour():
-    now_time = datetime.now()
-    hour = now_time.hour
-    minute = now_time.minute
-    # Londra: 10:00 - 13:00
-    if 10 <= hour < 13:
+    now = datetime.now()
+    h, m = now.hour, now.minute
+    if 10 <= h < 13:
         return True
-    # New York: 15:30 - 21:00
-    if hour == 15 and minute >= 30:
+    if h == 15 and m >= 30:
         return True
-    if 16 <= hour < 21:
+    if 16 <= h < 21:
         return True
     return False
 
@@ -65,39 +58,77 @@ def send_telegram_msg(text):
 
 
 def get_data(symbol, timeframe, limit=250):
-    """OHLCV verisi çek, RSI + EMA 9/21 hesapla."""
     bars = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
     df = pd.DataFrame(bars, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-    df['rsi'] = ta.rsi(df['close'], length=14)
-    df['ema9'] = ta.ema(df['close'], length=9)
+    df['rsi']   = ta.rsi(df['close'], length=14)
+    df['ema9']  = ta.ema(df['close'], length=9)
     df['ema21'] = ta.ema(df['close'], length=21)
+    df['ema10'] = ta.ema(df['close'], length=10)
+    df['ema50'] = ta.ema(df['close'], length=50)
     return df
 
 
-def get_trend(df):
-    """EMA 9/21'e göre trend yönü."""
-    price = df['close'].iloc[-1]
-    ema9 = df['ema9'].iloc[-1]
-    ema21 = df['ema21'].iloc[-1]
-    if ema9 > ema21 and price > ema9:
-        return "📈 Yukarı", True, False
-    elif ema9 < ema21 and price < ema9:
-        return "📉 Aşağı", False, True
+def analyze(df_1m, df_5m):
+    price   = round(df_1m['close'].iloc[-1], 2)
+    rsi_1m  = round(df_1m['rsi'].iloc[-1], 2)
+    ema9    = round(df_1m['ema9'].iloc[-1], 2)
+    ema21   = round(df_1m['ema21'].iloc[-1], 2)
+    rsi_5m  = round(df_5m['rsi'].iloc[-1], 2)
+    ema10   = round(df_5m['ema10'].iloc[-1], 2)
+    ema50   = round(df_5m['ema50'].iloc[-1], 2)
+
+    fast_bull = rsi_1m <= 40 and ema9 > ema21
+    fast_bear = rsi_1m >= 60 and ema9 < ema21
+    slow_bull = rsi_5m <= 45 and ema10 > ema50
+    slow_bear = rsi_5m >= 55 and ema10 < ema50
+
+    if fast_bull and slow_bull:
+        return "BUY", "GÜÇLÜ", price, rsi_1m, rsi_5m, ema9, ema21, ema10, ema50
+    elif fast_bear and slow_bear:
+        return "SELL", "GÜÇLÜ", price, rsi_1m, rsi_5m, ema9, ema21, ema10, ema50
+    elif fast_bull:
+        return "BUY", "ZAYIF", price, rsi_1m, rsi_5m, ema9, ema21, ema10, ema50
+    elif fast_bear:
+        return "SELL", "ZAYIF", price, rsi_1m, rsi_5m, ema9, ema21, ema10, ema50
     else:
-        return "➡️ Yatay", False, False
+        return None, None, price, rsi_1m, rsi_5m, ema9, ema21, ema10, ema50
+
+
+def build_msg(direction, strength, price, rsi_1m, rsi_5m, ema9, ema21, ema10, ema50, current_time_str, upgraded=False):
+    if direction == "BUY":
+        emoji = "🟢🟢" if strength == "GÜÇLÜ" else "🟡"
+        label = "ALIŞ"
+    else:
+        emoji = "🔴🔴" if strength == "GÜÇLÜ" else "🟠"
+        label = "SATIŞ"
+
+    upgrade_line = "\n⬆️ <b>Zayıf → Güçlü sinyale yükseldi!</b>" if upgraded else ""
+
+    return (
+        f"{emoji} <b>{strength} {label} SİNYALİ — XAU/USD</b>{upgrade_line}\n"
+        f"💰 PAXG Fiyat: <b>{price}</b>\n\n"
+        f"⚡ <b>Hızlı Sistem (1m)</b>\n"
+        f"RSI 1m: {rsi_1m} | EMA9: {ema9} | EMA21: {ema21}\n\n"
+        f"🐢 <b>Yavaş Sistem (5m)</b>\n"
+        f"RSI 5m: {rsi_5m} | EMA10: {ema10} | EMA50: {ema50}\n\n"
+        f"🎯 TP: +10/20$ | SL: -5$\n"
+        f"🕐 {current_time_str}"
+    )
 
 
 def run_bot():
-    logger.info("🚀 XAU/USD SCALP BOT BAŞLATILDI (PAXG RSI)")
+    logger.info("🚀 XAU/USD ÇIFT SİSTEM BOT BAŞLATILDI")
     send_telegram_msg(
-        f"🤖 <b>XAU Scalp Bot Başlatıldı!</b>\n"
+        f"🤖 <b>XAU Çift Sistem Bot Başlatıldı!</b>\n"
         f"📊 PAXG/USDT → XAU/USD sinyali\n"
-        f"⏱ Timeframe: 1m + 3m\n"
-        f"📈 RSI 40/60 | EMA 9/21\n"
+        f"⚡ Hızlı: 1m RSI + EMA 9/21\n"
+        f"🐢 Yavaş: 5m RSI + EMA 10/50\n"
+        f"💪 İkisi uyuşursa → GÜÇLÜ sinyal\n"
         f"🕐 {datetime.now().strftime('%H:%M:%S')}"
     )
 
-    last_alert = ""
+    # last_alert: None, "buy_zayıf", "buy_güçlü", "sell_zayıf", "sell_güçlü"
+    last_alert = None
     consecutive_errors = 0
     MAX_ERRORS = 10
 
@@ -106,62 +137,48 @@ def run_bot():
             current_time_str = datetime.now().strftime('%H:%M:%S')
 
             if is_trading_hour():
-                # 1m ve 3m veri çek
                 df_1m = get_data(SYMBOL, '1m')
-                df_3m = get_data(SYMBOL, '3m')
+                df_5m = get_data(SYMBOL, '5m')
 
-                rsi_1m = round(df_1m['rsi'].iloc[-1], 2)
-                rsi_3m = round(df_3m['rsi'].iloc[-1], 2)
-                price = round(df_1m['close'].iloc[-1], 2)
-                ema9 = round(df_1m['ema9'].iloc[-1], 2)
-                ema21 = round(df_1m['ema21'].iloc[-1], 2)
-
-                trend_label, trend_up, trend_down = get_trend(df_1m)
+                signal, strength, price, rsi_1m, rsi_5m, ema9, ema21, ema10, ema50 = analyze(df_1m, df_5m)
 
                 logger.info(
                     f"[{current_time_str}] Fiyat: {price} | "
-                    f"RSI 1m: {rsi_1m} | RSI 3m: {rsi_3m} | {trend_label}"
+                    f"RSI 1m: {rsi_1m} | RSI 5m: {rsi_5m} | "
+                    f"Sinyal: {signal} ({strength})"
                 )
 
-                # ALIŞ SİNYALİ — RSI aşırı satım + trend yukarı
-                if rsi_1m <= LOWER_RSI and rsi_3m <= 45 and last_alert != "oversold":
-                    ema_note = "✅ EMA trend destekliyor!" if trend_up else "⚠️ Trende karşı, dikkatli ol!"
-                    msg = (
-                        f"🟢 <b>XAU/USD ALIŞ SİNYALİ</b>\n"
-                        f"💰 PAXG Fiyat: <b>{price}</b>\n"
-                        f"📉 RSI 1m: {rsi_1m} | RSI 3m: {rsi_3m}\n"
-                        f"📊 EMA9: {ema9} | EMA21: {ema21}\n"
-                        f"{trend_label}\n"
-                        f"{ema_note}\n"
-                        f"🎯 TP: +10/20$ | SL: -5$\n"
-                        f"🕐 {current_time_str}"
-                    )
-                    send_telegram_msg(msg)
-                    last_alert = "oversold"
+                if signal:
+                    alert_key = f"{signal.lower()}_{strength.lower()}"
 
-                # SATIŞ SİNYALİ — RSI aşırı alım + trend aşağı
-                elif rsi_1m >= UPPER_RSI and rsi_3m >= 55 and last_alert != "overbought":
-                    ema_note = "✅ EMA trend destekliyor!" if trend_down else "⚠️ Trende karşı, dikkatli ol!"
-                    msg = (
-                        f"🔴 <b>XAU/USD SATIŞ SİNYALİ</b>\n"
-                        f"💰 PAXG Fiyat: <b>{price}</b>\n"
-                        f"📈 RSI 1m: {rsi_1m} | RSI 3m: {rsi_3m}\n"
-                        f"📊 EMA9: {ema9} | EMA21: {ema21}\n"
-                        f"{trend_label}\n"
-                        f"{ema_note}\n"
-                        f"🎯 TP: +10/20$ | SL: -5$\n"
-                        f"🕐 {current_time_str}"
+                    # Zayıf sinyal → henüz bu yönde hiç sinyal yoksa gönder
+                    # Güçlü sinyal → zayıf gönderilmiş olsa bile gönder
+                    upgraded = (
+                        signal == "BUY" and last_alert == "buy_zayıf" and strength == "GÜÇLÜ"
+                        or
+                        signal == "SELL" and last_alert == "sell_zayıf" and strength == "GÜÇLÜ"
                     )
-                    send_telegram_msg(msg)
-                    last_alert = "overbought"
 
-                # Nötr bölge — sıfırla
-                elif 48 < rsi_1m < 52:
-                    last_alert = ""
+                    should_send = (
+                        last_alert != alert_key and (
+                            last_alert is None or
+                            upgraded or
+                            not last_alert.startswith(signal.lower())
+                        )
+                    )
+
+                    if should_send:
+                        msg = build_msg(signal, strength, price, rsi_1m, rsi_5m,
+                                        ema9, ema21, ema10, ema50, current_time_str, upgraded)
+                        send_telegram_msg(msg)
+                        last_alert = alert_key
+
+                elif signal is None and 48 < rsi_1m < 52:
+                    last_alert = None
 
             else:
                 if datetime.now().second % 30 == 0:
-                    logger.info(f"[{current_time_str}] 💤 İşlem saati değil. Beklemede...")
+                    logger.info(f"[{current_time_str}] 💤 İşlem saati değil.")
 
             consecutive_errors = 0
             time.sleep(CHECK_INTERVAL)
