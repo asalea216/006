@@ -22,7 +22,7 @@ TOKEN = "8607888019:AAH_9KT13bI_K3JjdSi52o_DTNxL2nWkRKc"
 CHAT_ID = "6220442563"
 SYMBOL = 'PAXG/USDT'
 
-CHECK_INTERVAL = 5  # saniye
+CHECK_INTERVAL = 10  # saniye
 
 exchange = ccxt.kucoin({
     'enableRateLimit': True,
@@ -31,15 +31,8 @@ exchange = ccxt.kucoin({
 
 
 def is_trading_hour():
-    now = datetime.now()
-    h, m = now.hour, now.minute
-    if 10 <= h < 13:
-        return True
-    if h == 15 and m >= 30:
-        return True
-    if 16 <= h < 21:
-        return True
-    return False
+    h = datetime.now().hour
+    return 8 <= h <= 23
 
 
 def send_telegram_msg(text):
@@ -57,78 +50,41 @@ def send_telegram_msg(text):
     return False
 
 
-def get_data(symbol, timeframe, limit=250):
+def get_data(symbol, timeframe, limit=500):
     bars = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
     df = pd.DataFrame(bars, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-    df['rsi']   = ta.rsi(df['close'], length=14)
-    df['ema9']  = ta.ema(df['close'], length=9)
-    df['ema21'] = ta.ema(df['close'], length=21)
-    df['ema10'] = ta.ema(df['close'], length=10)
-    df['ema50'] = ta.ema(df['close'], length=50)
+    df['rsi'] = ta.rsi(df['close'], length=14)
     return df
 
 
-def analyze(df_1m, df_5m):
-    price   = round(df_1m['close'].iloc[-1], 2)
-    rsi_1m  = round(df_1m['rsi'].iloc[-1], 2)
-    ema9    = round(df_1m['ema9'].iloc[-1], 2)
-    ema21   = round(df_1m['ema21'].iloc[-1], 2)
-    rsi_5m  = round(df_5m['rsi'].iloc[-1], 2)
-    ema10   = round(df_5m['ema10'].iloc[-1], 2)
-    ema50   = round(df_5m['ema50'].iloc[-1], 2)
+def calculate_vwap(df):
+    """Günlük VWAP hesapla — gün başından itibaren."""
+    df = df.copy()
+    df['date'] = pd.to_datetime(df['timestamp'], unit='ms').dt.date
+    today = df['date'].iloc[-1]
+    today_df = df[df['date'] == today].copy()
 
-    fast_bull = rsi_1m <= 40 and ema9 > ema21
-    fast_bear = rsi_1m >= 60 and ema9 < ema21
-    slow_bull = rsi_5m <= 45 and ema10 > ema50
-    slow_bear = rsi_5m >= 55 and ema10 < ema50
+    if len(today_df) < 2:
+        return None
 
-    if fast_bull and slow_bull:
-        return "BUY", "GÜÇLÜ", price, rsi_1m, rsi_5m, ema9, ema21, ema10, ema50
-    elif fast_bear and slow_bear:
-        return "SELL", "GÜÇLÜ", price, rsi_1m, rsi_5m, ema9, ema21, ema10, ema50
-    elif fast_bull:
-        return "BUY", "ZAYIF", price, rsi_1m, rsi_5m, ema9, ema21, ema10, ema50
-    elif fast_bear:
-        return "SELL", "ZAYIF", price, rsi_1m, rsi_5m, ema9, ema21, ema10, ema50
-    else:
-        return None, None, price, rsi_1m, rsi_5m, ema9, ema21, ema10, ema50
-
-
-def build_msg(direction, strength, price, rsi_1m, rsi_5m, ema9, ema21, ema10, ema50, current_time_str, upgraded=False):
-    if direction == "BUY":
-        emoji = "🟢🟢" if strength == "GÜÇLÜ" else "🟡"
-        label = "ALIŞ"
-    else:
-        emoji = "🔴🔴" if strength == "GÜÇLÜ" else "🟠"
-        label = "SATIŞ"
-
-    upgrade_line = "\n⬆️ <b>Zayıf → Güçlü sinyale yükseldi!</b>" if upgraded else ""
-
-    return (
-        f"{emoji} <b>{strength} {label} SİNYALİ — XAU/USD</b>{upgrade_line}\n"
-        f"💰 PAXG Fiyat: <b>{price}</b>\n\n"
-        f"⚡ <b>Hızlı Sistem (1m)</b>\n"
-        f"RSI 1m: {rsi_1m} | EMA9: {ema9} | EMA21: {ema21}\n\n"
-        f"🐢 <b>Yavaş Sistem (5m)</b>\n"
-        f"RSI 5m: {rsi_5m} | EMA10: {ema10} | EMA50: {ema50}\n\n"
-        f"🎯 TP: +10/20$ | SL: -5$\n"
-        f"🕐 {current_time_str}"
-    )
+    today_df['tp'] = (today_df['high'] + today_df['low'] + today_df['close']) / 3
+    today_df['tpv'] = today_df['tp'] * today_df['volume']
+    vwap = today_df['tpv'].cumsum() / today_df['volume'].cumsum()
+    return round(vwap.iloc[-1], 2)
 
 
 def run_bot():
-    logger.info("🚀 XAU/USD ÇIFT SİSTEM BOT BAŞLATILDI")
+    logger.info("🚀 XAU/USD VWAP + RSI BOT BAŞLATILDI")
     send_telegram_msg(
-        f"🤖 <b>XAU Çift Sistem Bot Başlatıldı!</b>\n"
+        f"🤖 <b>XAU VWAP + RSI Bot Başlatıldı!</b>\n"
         f"📊 PAXG/USDT → XAU/USD sinyali\n"
-        f"⚡ Hızlı: 1m RSI + EMA 9/21\n"
-        f"🐢 Yavaş: 5m RSI + EMA 10/50\n"
-        f"💪 İkisi uyuşursa → GÜÇLÜ sinyal\n"
+        f"⏱ Timeframe: 5m + 15m\n"
+        f"📈 RSI 30/70 + VWAP filtresi\n"
+        f"🕐 Aktif: 08:00 - 23:59\n"
         f"🕐 {datetime.now().strftime('%H:%M:%S')}"
     )
 
-    # last_alert: None, "buy_zayıf", "buy_güçlü", "sell_zayıf", "sell_güçlü"
-    last_alert = None
+    last_alert = None  # "buy_rsi", "buy_vwap", "sell_rsi", "sell_vwap"
     consecutive_errors = 0
     MAX_ERRORS = 10
 
@@ -137,48 +93,120 @@ def run_bot():
             current_time_str = datetime.now().strftime('%H:%M:%S')
 
             if is_trading_hour():
-                df_1m = get_data(SYMBOL, '1m')
-                df_5m = get_data(SYMBOL, '5m')
+                df_5m  = get_data(SYMBOL, '5m',  limit=500)
+                df_15m = get_data(SYMBOL, '15m', limit=200)
 
-                signal, strength, price, rsi_1m, rsi_5m, ema9, ema21, ema10, ema50 = analyze(df_1m, df_5m)
+                rsi_5m  = round(df_5m['rsi'].iloc[-1], 2)
+                rsi_15m = round(df_15m['rsi'].iloc[-1], 2)
+                price   = round(df_5m['close'].iloc[-1], 2)
+                vwap    = calculate_vwap(df_5m)
+
+                vwap_bull = vwap and price < vwap   # fiyat VWAP altında → alış bölgesi
+                vwap_bear = vwap and price > vwap   # fiyat VWAP üstünde → satış bölgesi
+                confirm_15m_bull = rsi_15m <= 35
+                confirm_15m_bear = rsi_15m >= 65
 
                 logger.info(
-                    f"[{current_time_str}] Fiyat: {price} | "
-                    f"RSI 1m: {rsi_1m} | RSI 5m: {rsi_5m} | "
-                    f"Sinyal: {signal} ({strength})"
+                    f"[{current_time_str}] Fiyat: {price} | VWAP: {vwap} | "
+                    f"RSI 5m: {rsi_5m} | RSI 15m: {rsi_15m}"
                 )
 
-                if signal:
-                    alert_key = f"{signal.lower()}_{strength.lower()}"
-
-                    # Zayıf sinyal → henüz bu yönde hiç sinyal yoksa gönder
-                    # Güçlü sinyal → zayıf gönderilmiş olsa bile gönder
-                    upgraded = (
-                        signal == "BUY" and last_alert == "buy_zayıf" and strength == "GÜÇLÜ"
-                        or
-                        signal == "SELL" and last_alert == "sell_zayıf" and strength == "GÜÇLÜ"
-                    )
-
-                    should_send = (
-                        last_alert != alert_key and (
-                            last_alert is None or
-                            upgraded or
-                            not last_alert.startswith(signal.lower())
+                # --- ALIŞ ---
+                if rsi_5m <= 30:
+                    if vwap_bull and confirm_15m_bull and last_alert != "buy_vwap":
+                        # GÜÇLÜ: RSI + 15m teyit + VWAP uyumlu
+                        msg = (
+                            f"🟢🟢 <b>GÜÇLÜ ALIŞ SİNYALİ — XAU/USD</b>\n"
+                            f"💰 PAXG Fiyat: <b>{price}</b>\n"
+                            f"📊 VWAP: {vwap} — Fiyat VWAP <b>altında</b> ✅\n"
+                            f"📉 RSI 5m: {rsi_5m} | RSI 15m: {rsi_15m}\n"
+                            f"💪 Tüm koşullar uyumlu!\n"
+                            f"🎯 TP: +10/20$ | SL: -5$\n"
+                            f"🕐 {current_time_str}"
                         )
-                    )
-
-                    if should_send:
-                        msg = build_msg(signal, strength, price, rsi_1m, rsi_5m,
-                                        ema9, ema21, ema10, ema50, current_time_str, upgraded)
                         send_telegram_msg(msg)
-                        last_alert = alert_key
+                        last_alert = "buy_vwap"
 
-                elif signal is None and 48 < rsi_1m < 52:
+                    elif last_alert not in ("buy_rsi", "buy_vwap"):
+                        # ZAYIF: Sadece RSI sinyali
+                        vwap_note = f"⚠️ VWAP: {vwap} — Fiyat VWAP üstünde, dikkatli ol!" if vwap_bear else f"📊 VWAP: {vwap}"
+                        msg = (
+                            f"🟡 <b>RSI ALIŞ SİNYALİ — XAU/USD</b>\n"
+                            f"💰 PAXG Fiyat: <b>{price}</b>\n"
+                            f"{vwap_note}\n"
+                            f"📉 RSI 5m: {rsi_5m} | RSI 15m: {rsi_15m}\n"
+                            f"⚠️ VWAP teyidi yok, dikkatli gir!\n"
+                            f"🎯 TP: +10/20$ | SL: -5$\n"
+                            f"🕐 {current_time_str}"
+                        )
+                        send_telegram_msg(msg)
+                        last_alert = "buy_rsi"
+
+                # --- SATIŞ ---
+                elif rsi_5m >= 70:
+                    if vwap_bear and confirm_15m_bear and last_alert != "sell_vwap":
+                        # GÜÇLÜ: RSI + 15m teyit + VWAP uyumlu
+                        msg = (
+                            f"🔴🔴 <b>GÜÇLÜ SATIŞ SİNYALİ — XAU/USD</b>\n"
+                            f"💰 PAXG Fiyat: <b>{price}</b>\n"
+                            f"📊 VWAP: {vwap} — Fiyat VWAP <b>üstünde</b> ✅\n"
+                            f"📈 RSI 5m: {rsi_5m} | RSI 15m: {rsi_15m}\n"
+                            f"💪 Tüm koşullar uyumlu!\n"
+                            f"🎯 TP: +10/20$ | SL: -5$\n"
+                            f"🕐 {current_time_str}"
+                        )
+                        send_telegram_msg(msg)
+                        last_alert = "sell_vwap"
+
+                    elif last_alert not in ("sell_rsi", "sell_vwap"):
+                        # ZAYIF: Sadece RSI sinyali
+                        vwap_note = f"⚠️ VWAP: {vwap} — Fiyat VWAP altında, dikkatli ol!" if vwap_bull else f"📊 VWAP: {vwap}"
+                        msg = (
+                            f"🟠 <b>RSI SATIŞ SİNYALİ — XAU/USD</b>\n"
+                            f"💰 PAXG Fiyat: <b>{price}</b>\n"
+                            f"{vwap_note}\n"
+                            f"📈 RSI 5m: {rsi_5m} | RSI 15m: {rsi_15m}\n"
+                            f"⚠️ VWAP teyidi yok, dikkatli gir!\n"
+                            f"🎯 TP: +10/20$ | SL: -5$\n"
+                            f"🕐 {current_time_str}"
+                        )
+                        send_telegram_msg(msg)
+                        last_alert = "sell_rsi"
+
+                # RSI sinyalden sonra VWAP da uydu → güçlüye yükselt
+                elif last_alert == "buy_rsi" and vwap_bull and confirm_15m_bull:
+                    msg = (
+                        f"🟢🟢 <b>GÜÇLÜ ALIŞ — VWAP Teyidi Geldi!</b>\n"
+                        f"💰 PAXG Fiyat: <b>{price}</b>\n"
+                        f"📊 VWAP: {vwap} — Fiyat VWAP <b>altında</b> ✅\n"
+                        f"📉 RSI 5m: {rsi_5m} | RSI 15m: {rsi_15m}\n"
+                        f"⬆️ RSI sinyali VWAP ile güçlendi!\n"
+                        f"🎯 TP: +10/20$ | SL: -5$\n"
+                        f"🕐 {current_time_str}"
+                    )
+                    send_telegram_msg(msg)
+                    last_alert = "buy_vwap"
+
+                elif last_alert == "sell_rsi" and vwap_bear and confirm_15m_bear:
+                    msg = (
+                        f"🔴🔴 <b>GÜÇLÜ SATIŞ — VWAP Teyidi Geldi!</b>\n"
+                        f"💰 PAXG Fiyat: <b>{price}</b>\n"
+                        f"📊 VWAP: {vwap} — Fiyat VWAP <b>üstünde</b> ✅\n"
+                        f"📈 RSI 5m: {rsi_5m} | RSI 15m: {rsi_15m}\n"
+                        f"⬆️ RSI sinyali VWAP ile güçlendi!\n"
+                        f"🎯 TP: +10/20$ | SL: -5$\n"
+                        f"🕐 {current_time_str}"
+                    )
+                    send_telegram_msg(msg)
+                    last_alert = "sell_vwap"
+
+                # Nötr bölge — sıfırla
+                if 45 < rsi_5m < 55:
                     last_alert = None
 
             else:
                 if datetime.now().second % 30 == 0:
-                    logger.info(f"[{current_time_str}] 💤 İşlem saati değil.")
+                    logger.info(f"[{current_time_str}] 💤 Saat 08:00'i bekliyor...")
 
             consecutive_errors = 0
             time.sleep(CHECK_INTERVAL)
